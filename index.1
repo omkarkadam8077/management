@@ -1,0 +1,227 @@
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using System.ComponentModel.DataAnnotations;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Exception Handling Middleware
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Error: " + ex.Message);
+
+        context.Response.StatusCode = 500;
+        context.Response.ContentType = "application/json";
+
+        await context.Response.WriteAsync(
+            "{\"status\":500,\"message\":\"Something went wrong on the server.\"}");
+    }
+});
+
+// Request Logging Middleware
+app.Use(async (context, next) =>
+{
+    DateTime start = DateTime.Now;
+
+    Console.WriteLine("Request -> " +
+        context.Request.Method + " " + context.Request.Path);
+
+    await next();
+
+    TimeSpan time = DateTime.Now - start;
+
+    Console.WriteLine("Response <- " +
+        context.Response.StatusCode + " (" +
+        (int)time.TotalMilliseconds + " ms)");
+});
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+
+// Database connection
+string connectionString =
+    "Data Source=(localdb)\\MSSQLLocalDB;Initial Catalog=StudentAPI;Integrated Security=True;TrustServerCertificate=True";
+
+// Student Model
+// API endpoints
+
+app.MapGet("/api/students", () =>
+{
+    List<Student> students = new();
+
+    using SqlConnection con = new(connectionString);
+    string query = "SELECT * FROM Students";
+
+    using SqlCommand cmd = new(query, con);
+    con.Open();
+
+    using SqlDataReader reader = cmd.ExecuteReader();
+
+    while (reader.Read())
+    {
+        students.Add(new Student
+        {
+            Id = Convert.ToInt32(reader["Id"]),
+            Name = reader["Name"].ToString()!,
+            Email = reader["Email"].ToString()!,
+            Course = reader["Course"].ToString()!
+        });
+    }
+
+    return Results.Ok(students);
+});
+
+app.MapGet("/api/students/{id}", (int id) =>
+{
+    using SqlConnection con = new(connectionString);
+
+    string query = "SELECT * FROM Students WHERE Id = @Id";
+
+    using SqlCommand cmd = new(query, con);
+    cmd.Parameters.AddWithValue("@Id", id);
+
+    con.Open();
+
+    using SqlDataReader reader = cmd.ExecuteReader();
+
+    if (reader.Read())
+    {
+        Student student = new()
+        {
+            Id = Convert.ToInt32(reader["Id"]),
+            Name = reader["Name"].ToString()!,
+            Email = reader["Email"].ToString()!,
+            Course = reader["Course"].ToString()!
+        };
+
+        return Results.Ok(student);
+    }
+
+    return Results.NotFound();
+});
+
+app.MapPost("/api/students", (Student student) =>
+{
+    var errors = ValidateStudent(student);
+    if (errors.Count > 0)
+        return Results.ValidationProblem(errors);
+
+    using SqlConnection con = new(connectionString);
+
+    string query = @"INSERT INTO Students (Name, Email, Course)
+                     VALUES (@Name, @Email, @Course);
+                     SELECT CAST(SCOPE_IDENTITY() AS INT);";
+
+    using SqlCommand cmd = new(query, con);
+
+    cmd.Parameters.AddWithValue("@Name", student.Name);
+    cmd.Parameters.AddWithValue("@Email", student.Email);
+    cmd.Parameters.AddWithValue("@Course", student.Course);
+
+    con.Open();
+
+    student.Id = Convert.ToInt32(cmd.ExecuteScalar());
+
+    return Results.Created($"/api/students/{student.Id}", student);
+});
+
+app.MapPut("/api/students/{id}", (int id, Student student) =>
+{
+    var errors = ValidateStudent(student);
+    if (errors.Count > 0)
+        return Results.ValidationProblem(errors);
+
+    using SqlConnection con = new(connectionString);
+
+    string query = @"UPDATE Students
+                     SET Name = @Name,
+                         Email = @Email,
+                         Course = @Course
+                     WHERE Id = @Id";
+
+    using SqlCommand cmd = new(query, con);
+
+    cmd.Parameters.AddWithValue("@Id", id);
+    cmd.Parameters.AddWithValue("@Name", student.Name);
+    cmd.Parameters.AddWithValue("@Email", student.Email);
+    cmd.Parameters.AddWithValue("@Course", student.Course);
+
+    con.Open();
+
+    int rows = cmd.ExecuteNonQuery();
+
+    if (rows == 0)
+        return Results.NotFound();
+
+    return Results.Ok("Student updated successfully.");
+});
+
+app.MapDelete("/api/students/{id}", (int id) =>
+{
+    using SqlConnection con = new(connectionString);
+
+    string query = "DELETE FROM Students WHERE Id = @Id";
+
+    using SqlCommand cmd = new(query, con);
+    cmd.Parameters.AddWithValue("@Id", id);
+
+    con.Open();
+
+    int rows = cmd.ExecuteNonQuery();
+
+    if (rows == 0)
+        return Results.NotFound();
+
+    return Results.Ok("Student deleted successfully.");
+});
+
+app.Run();
+
+// Validation Method
+static Dictionary<string, string[]> ValidateStudent(Student student)
+{
+    var results = new List<ValidationResult>();
+    var context = new ValidationContext(student);
+
+    Validator.TryValidateObject(student, context, results, true);
+
+    return results
+        .SelectMany(r => r.MemberNames.Select(name =>
+            new { name, message = r.ErrorMessage ?? "Invalid value" }))
+        .GroupBy(x => x.name)
+        .ToDictionary(g => g.Key, g => g.Select(x => x.message).ToArray());
+}
+
+// Student Model
+public class Student
+{
+    public int Id { get; set; }
+
+    [Required(ErrorMessage = "Name is required")]
+    public string Name { get; set; } = "";
+
+    [Required(ErrorMessage = "Email is required")]
+    [EmailAddress(ErrorMessage = "Enter a valid email")]
+    public string Email { get; set; } = "";
+
+    [Required(ErrorMessage = "Course is required")]
+    public string Course { get; set; } = "";
+}
